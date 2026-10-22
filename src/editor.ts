@@ -8,6 +8,8 @@ import {Paragraph, Heading, Strong, Emphasis, Code, Link, CodeBlock} from 'wordg
 import {PATH, decode, encode, resolveComment, safeLink} from './model.ts';
 import {projectChanges} from './projection.ts';
 import {Replica, type Change} from './replica.ts';
+import {Subscription} from 'rxjs';
+import type {EditorSession} from './session.ts';
 import {mountMermaid} from './mermaid-renderer.ts';
 
 const peerCaret = Widget.define<string>({
@@ -20,15 +22,15 @@ export class NativeEditor {
   readonly editor: Wordgard;
   private writing = false;
   private destroyed = false;
-  private stop: () => void;
+  private readonly subscriptions = new Subscription();
   private heartbeat: ReturnType<typeof setInterval>;
   private flash: {from: string; to: string; until: number} | null = null;
   private preview: ReturnType<typeof mountMermaid> | null = null;
   private previewSource = '';
   private pendingSelection: {first: string; last: string; width: number} | null = null;
   readonly error: HTMLElement;
-  onChange: () => void = () => {};
-  constructor(root: HTMLElement, replica: Replica) {
+  constructor(root: HTMLElement, session: EditorSession) {
+    const replica = session.replica;
     this.root = root; this.replica = replica;
     root.innerHTML = `
       <div class="pane-heading"><span class="avatar">${replica.name === 'You' ? 'Y' : 'C'}</span><strong></strong><span class="view-label">Independent replica</span></div>
@@ -64,8 +66,8 @@ export class NativeEditor {
       ],
     });
     this.editor.dom.classList.add('native-document');
-    this.stop = replica.observe(change => this.receive(change));
-    replica.presenceListeners.add(this.repaint);
+    this.subscriptions.add(session.changes$.subscribe(change => this.receive(change)));
+    this.subscriptions.add(session.presence$.subscribe(this.repaint));
     this.heartbeat = setInterval(() => {
       if (this.editor.hasFocus) this.publishSelection();
       this.repaint();
@@ -102,7 +104,7 @@ export class NativeEditor {
       const anchor = (e.target as Element).closest('a');
       if (anchor) { e.preventDefault(); this.openLink(); }
     });
-    this.editor.contentDOM.addEventListener('focusout', () => setTimeout(() => { if (!this.editor.hasFocus) replica.hidePresence(); }, 0));
+    this.editor.contentDOM.addEventListener('focusout', () => setTimeout(() => { if (!this.destroyed && !this.editor.hasFocus) replica.hidePresence(); }, 0));
     this.refreshContent(); this.updateUI();
   }
   showError(error: unknown) {
@@ -122,7 +124,7 @@ export class NativeEditor {
       this.editor.dispatch({changes: projectChanges(this.editor.state.doc, decode(A.spans(this.replica.doc, PATH))), annotations: [Transaction.remote.of(true), Transaction.addToHistory.of(false), history.isolate.of(true)]});
     } finally { this.writing = false; }
     this.publishSelection();
-    if (transactions.some(tr => tr.docChanged)) { this.refreshContent(); this.onChange(); }
+    if (transactions.some(tr => tr.docChanged)) this.refreshContent();
   }
   private receive(change: Change) {
     if (this.writing || this.destroyed) return;
@@ -141,7 +143,7 @@ export class NativeEditor {
         if (change.remote && to > from) this.flash = {from: A.getCursor(change.after, PATH, next.wgToAm[from], 'after'), to: A.getCursor(change.after, PATH, next.wgToAm[to], 'before'), until: Date.now() + 1800};
       }
       this.editor.dispatch({changes, selection, annotations: [Transaction.remote.of(true), Transaction.addToHistory.of(false), history.isolate.of(true)]});
-      this.refreshContent(); this.onChange();
+      this.refreshContent();
     } catch (error) { this.showError(error); }
   }
   private publishSelection() {
@@ -273,5 +275,6 @@ export class NativeEditor {
       }
     }
   }
-  destroy() { this.destroyed = true; clearInterval(this.heartbeat); this.stop(); this.replica.presenceListeners.delete(this.repaint); this.replica.hidePresence(); this.preview?.destroy(); this.editor.dom.remove(); }
+  setSaveState(value: string) { this.root.querySelector('.save-state')!.textContent = value; }
+  destroy() { if (this.destroyed) return; this.destroyed = true; clearInterval(this.heartbeat); this.subscriptions.unsubscribe(); this.replica.hidePresence(); this.preview?.destroy(); this.editor.dom.remove(); }
 }

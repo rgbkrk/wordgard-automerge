@@ -176,3 +176,37 @@ test('unreadable saved data is preserved and never reported as saved', async ({p
   await select(page, 0); await page.keyboard.insertText(' temporary');
   expect(await page.evaluate(id => localStorage.getItem(`nteract-wordgard-native-v1:${id}`), id)).toBe('unreadable fixture');
 });
+test('React rerenders preserve Wordgard identity, selection, and undo history', async ({page}) => {
+  await open(page); await select(page, 0); await page.keyboard.insertText(' REACT'); await converged(page);
+  const before = await page.evaluate(() => {
+    const editor = window.nativeProse.views[0].editor;
+    return {id: editor.contentDOM.id, anchor: editor.state.selection.anchor, head: editor.state.selection.head};
+  });
+  await page.getByRole('button', {name: 'Focus view', exact: true}).click();
+  await page.getByRole('button', {name: 'Inspect document', exact: true}).click();
+  await page.getByRole('button', {name: 'Side by side', exact: true}).click();
+  const after = await page.evaluate(() => {
+    const editor = window.nativeProse.views[0].editor;
+    return {id: editor.contentDOM.id, anchor: editor.state.selection.anchor, head: editor.state.selection.head};
+  });
+  expect(after).toEqual(before);
+  await page.locator('#left .toolbar').getByRole('button', {name: 'Undo', exact: true}).click(); await converged(page);
+  await expect(page.locator('#left wg-content')).not.toContainText('REACT');
+});
+test('Strict Mode mounts and remounts views without duplicating subscriptions or replicas', async ({page}) => {
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
+  await open(page); await select(page, 0); await page.keyboard.insertText(' PERSISTENT'); await converged(page);
+  const actors = await page.evaluate(() => {const {A,left,right} = window.nativeProse; return [A.getActorId(left.doc),A.getActorId(right.doc)];});
+  for (let i = 0; i < 2; i++) {
+    await page.evaluate(() => window.nativeProse.renderEditors(false));
+    await expect(page.locator('wg-content')).toHaveCount(0);
+    const detached = await page.evaluate(() => {const {left,right,views} = window.nativeProse; return {listeners: [left.listeners.size,right.listeners.size], presence: [left.presenceListeners.size,right.presenceListeners.size], views: views.every((v: unknown) => v === null)};});
+    expect(detached).toEqual({listeners: [1,1], presence: [0,0], views: true});
+    await page.evaluate(() => {window.nativeProse.session.agentEdit(); window.nativeProse.link.flush(); window.nativeProse.renderEditors(true);});
+    await expect(page.locator('wg-content')).toHaveCount(2); await converged(page);
+    await expect(page.locator('#right wg-content')).toContainText('PERSISTENT');
+    const attached = await page.evaluate(() => {const {A,left,right} = window.nativeProse; return {actors: [A.getActorId(left.doc),A.getActorId(right.doc)], listeners: [left.listeners.size,right.listeners.size], presence: [left.presenceListeners.size,right.presenceListeners.size]};});
+    expect(attached).toEqual({actors, listeners: [1,1], presence: [1,1]});
+  }
+  expect(errors).toEqual([]);
+});
